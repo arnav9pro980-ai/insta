@@ -830,50 +830,195 @@ async def messages(
         )
 
 
+
+
+
+
+
+
+
+
+
+
+
 @app.post("/send")
-async def send(
-    data: SendRequest
-):
+async def send_message(data: dict):
+    if not controller.started:
+        raise HTTPException(status_code=503, detail="Instagram controller is not ready")
 
-    if not data.thread.strip():
+    thread = str(data.get("thread", "")).strip()
+    message = str(data.get("message", "")).strip()
 
+    if not thread or not message:
         raise HTTPException(
             status_code=400,
-            detail="Thread cannot be empty"
+            detail="thread and message are required"
         )
 
-    if not data.message.strip():
+    async with controller.lock:
+        opened = await controller.page.evaluate(
+            """
+            (thread) => {
+                const spans = Array.from(
+                    document.querySelectorAll('span[title]')
+                );
 
-        raise HTTPException(
-            status_code=400,
-            detail="Message cannot be empty"
+                const span = spans.find(
+                    s => (s.getAttribute('title') || '').trim() === thread
+                );
+
+                if (!span) return {
+                    success: false,
+                    reason: "thread_not_found"
+                };
+
+                let el = span;
+
+                for (let i = 0; i < 10 && el; i++) {
+                    const rect = el.getBoundingClientRect();
+
+                    if (
+                        rect.width > 0 &&
+                        rect.height > 0 &&
+                        (
+                            el.tagName === 'A' ||
+                            el.getAttribute('role') === 'button' ||
+                            el.getAttribute('role') === 'link' ||
+                            typeof el.onclick === 'function'
+                        )
+                    ) {
+                        el.click();
+
+                        return {
+                            success: true,
+                            tag: el.tagName,
+                            role: el.getAttribute('role')
+                        };
+                    }
+
+                    el = el.parentElement;
+                }
+
+                span.click();
+
+                return {
+                    success: true,
+                    tag: "SPAN",
+                    role: span.getAttribute("role")
+                };
+            }
+            """,
+            thread
         )
 
-    try:
+        if not opened.get("success"):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Could not find Instagram thread: {thread}"
+            )
 
-        result = await controller.send_message(
-            data.thread,
-            data.message
+        await controller.page.wait_for_timeout(1500)
+
+        box_found = await controller.page.evaluate(
+            """
+            () => {
+                const box =
+                    document.querySelector('div[contenteditable="true"]') ||
+                    document.querySelector('p.xat24cr');
+
+                if (!box) return false;
+
+                box.focus();
+
+                return true;
+            }
+            """
         )
+
+        if not box_found:
+            raise HTTPException(
+                status_code=500,
+                detail="Message input box not found"
+            )
+
+        await controller.page.evaluate(
+            """
+            (message) => {
+                const box =
+                    document.querySelector('div[contenteditable="true"]') ||
+                    document.querySelector('p.xat24cr');
+
+                if (!box) return false;
+
+                box.focus();
+
+                document.execCommand(
+                    'insertText',
+                    false,
+                    message
+                );
+
+                box.dispatchEvent(
+                    new InputEvent('input', {
+                        bubbles: true,
+                        inputType: 'insertText',
+                        data: message
+                    })
+                );
+
+                return true;
+            }
+            """,
+            message
+        )
+
+        await controller.page.wait_for_timeout(500)
+
+        sent = await controller.page.evaluate(
+            """
+            () => {
+                const buttons = Array.from(
+                    document.querySelectorAll(
+                        'button, div[role="button"]'
+                    )
+                );
+
+                const sendButton = buttons.find(
+                    el =>
+                        (el.innerText || '')
+                            .trim()
+                            .toLowerCase() === 'send'
+                );
+
+                if (sendButton) {
+                    sendButton.click();
+                    return true;
+                }
+
+                return false;
+            }
+            """
+        )
+
+        if (!sent:
+            await controller.page.keyboard.press("Enter")
+            sent = true
 
         return {
-            "success": True,
-            **result
+            "success": true,
+            "thread": thread,
+            "message": message,
+            "opened": opened,
+            "sent": sent
         }
 
-    except ValueError as e:
 
-        raise HTTPException(
-            status_code=404,
-            detail=str(e)
-        )
 
-    except Exception as e:
 
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+
+
+
+
 
 
 @app.get("/debug")
