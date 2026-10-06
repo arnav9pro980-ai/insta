@@ -10,6 +10,8 @@ services:
     healthCheckPath: /health
     autoDeploy: false
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
       - key: IG_USERNAME
         sync: false
       - key: IG_PASSWORD
