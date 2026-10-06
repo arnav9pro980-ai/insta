@@ -1,13 +1,12 @@
 import base64
 import json
 import os
-import time
-import threading
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
+from playwright.async_api import async_playwright
 
 
 INBOX_URL = "https://www.instagram.com/direct/inbox/"
@@ -63,6 +62,7 @@ JS_EXTRACT_THREADS = """
 
             if (name && !threads.some(t => t.name === name)) {
                 const anchor = span.closest('a');
+
                 const href = anchor
                     ? anchor.getAttribute('href')
                     : '';
@@ -100,23 +100,6 @@ JS_READ_MSGS = """
 
         if (!text) return;
 
-        let rowContainer = article;
-
-        for (let i = 0; i < 6; i++) {
-            if (rowContainer.parentElement) {
-                const parent = rowContainer.parentElement;
-                const style = window.getComputedStyle(parent);
-
-                if (
-                    style.display === 'flex' ||
-                    parent.getAttribute('role') === 'row' ||
-                    String(parent.className).includes('html-div')
-                ) {
-                    rowContainer = parent;
-                }
-            }
-        }
-
         let isSender = false;
 
         const articleStyle = window.getComputedStyle(article);
@@ -137,6 +120,23 @@ JS_READ_MSGS = """
 
             if (rect.left > window.innerWidth * 0.45) {
                 isSender = true;
+            }
+        }
+
+        let rowContainer = article;
+
+        for (let i = 0; i < 6; i++) {
+            if (rowContainer.parentElement) {
+                const parent = rowContainer.parentElement;
+                const style = window.getComputedStyle(parent);
+
+                if (
+                    style.display === 'flex' ||
+                    parent.getAttribute('role') === 'row' ||
+                    String(parent.className).includes('html-div')
+                ) {
+                    rowContainer = parent;
+                }
             }
         }
 
@@ -237,233 +237,301 @@ class SendRequest(BaseModel):
 
 
 class InstagramController:
+
     def __init__(self):
         self.playwright = None
         self.browser = None
         self.context = None
         self.page = None
-        self.lock = threading.RLock()
+        self.lock = asyncio.Lock()
         self.started = False
+        self.start_error = None
 
-    def start(self):
-        with self.lock:
+    async def start(self):
+        async with self.lock:
+
             if self.started:
                 return
 
             print("[*] Starting Playwright...")
 
-            self.playwright = sync_playwright().start()
+            try:
+                self.playwright = await async_playwright().start()
 
-            launch_args = [
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ]
-
-            self.browser = self.playwright.chromium.launch(
-                headless=True,
-                args=launch_args
-            )
-
-            storage_state = None
-
-            if IG_SESSION_BASE64:
-                print("[*] Loading IG_SESSION_BASE64...")
-
-                try:
-                    decoded = base64.b64decode(
-                        IG_SESSION_BASE64
-                    ).decode("utf-8")
-
-                    storage_state = json.loads(decoded)
-
-                    print("[+] Instagram session loaded")
-
-                except Exception as e:
-                    print(
-                        f"[!] Failed to decode session: {e}"
-                    )
-
-            context_args = {
-                "viewport": {
-                    "width": 1280,
-                    "height": 900
-                },
-                "user_agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 "
-                    "Safari/537.36"
+                self.browser = await self.playwright.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-blink-features=AutomationControlled"
+                    ]
                 )
-            }
 
-            if storage_state:
-                context_args["storage_state"] = storage_state
+                storage_state = None
 
-            self.context = self.browser.new_context(
-                **context_args
-            )
+                if IG_SESSION_BASE64:
+                    print("[*] Loading IG_SESSION_BASE64...")
 
-            self.page = self.context.new_page()
+                    try:
+                        decoded = base64.b64decode(
+                            IG_SESSION_BASE64
+                        ).decode("utf-8")
 
-            self.page.goto(
-                INBOX_URL,
-                wait_until="domcontentloaded",
-                timeout=60000
-            )
+                        storage_state = json.loads(decoded)
 
-            time.sleep(5)
+                        print("[+] Instagram session loaded")
 
-            if "login" in self.page.url:
-                print("[!] Instagram session is not authenticated")
+                    except Exception as e:
+                        print(
+                            f"[!] Could not decode IG_SESSION_BASE64: {e}"
+                        )
 
-                if IG_USERNAME and IG_PASSWORD:
-                    self.login()
+                context_args = {
+                    "viewport": {
+                        "width": 1280,
+                        "height": 900
+                    },
+                    "user_agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 "
+                        "Safari/537.36"
+                    )
+                }
 
-                else:
-                    raise RuntimeError(
-                        "Instagram session expired and "
-                        "INSTA_USER/INSTA_PASSWORD are not configured"
+                if storage_state:
+                    context_args["storage_state"] = storage_state
+
+                self.context = await self.browser.new_context(
+                    **context_args
+                )
+
+                self.page = await self.context.new_page()
+
+                print("[*] Opening Instagram inbox...")
+
+                await self.page.goto(
+                    INBOX_URL,
+                    wait_until="domcontentloaded",
+                    timeout=60000
+                )
+
+                await asyncio.sleep(5)
+
+                print(
+                    f"[*] Current URL: {self.page.url}"
+                )
+
+                if "login" in self.page.url:
+
+                    print(
+                        "[!] Instagram session is not authenticated"
                     )
 
-            print(
-                f"[+] Instagram ready: {self.page.url}"
-            )
+                    if IG_USERNAME and IG_PASSWORD:
+                        await self.login()
+                    else:
+                        raise RuntimeError(
+                            "Instagram session expired and "
+                            "no INSTA_USER/INSTA_PASSWORD were provided"
+                        )
 
-            self.started = True
+                self.started = True
+                self.start_error = None
 
-    def login(self):
-        print("[*] Logging into Instagram...")
+                print(
+                    "[+] Instagram controller ready"
+                )
 
-        self.page.goto(
+            except Exception as e:
+
+                self.start_error = str(e)
+
+                print(
+                    f"[!] Instagram startup failed: {e}"
+                )
+
+    async def login(self):
+
+        print("[*] Opening Instagram login...")
+
+        await self.page.goto(
             LOGIN_URL,
             wait_until="domcontentloaded",
             timeout=60000
         )
 
-        time.sleep(3)
+        await asyncio.sleep(3)
 
         username_input = self.page.locator(
-            'input[name="username"], '
-            'input[type="email"]'
+            'input[name="username"], input[type="email"]'
         ).first
 
         password_input = self.page.locator(
-            'input[name="password"], '
-            'input[type="password"]'
+            'input[name="password"], input[type="password"]'
         ).first
 
-        username_input.fill(IG_USERNAME)
-        password_input.fill(IG_PASSWORD)
+        await username_input.fill(
+            IG_USERNAME
+        )
 
-        password_input.press("Enter")
+        await password_input.fill(
+            IG_PASSWORD
+        )
 
-        print("[*] Waiting for Instagram login...")
+        await password_input.press(
+            "Enter"
+        )
 
-        time.sleep(10)
+        print(
+            "[*] Waiting for Instagram authentication..."
+        )
 
-        self.page.goto(
+        await asyncio.sleep(10)
+
+        await self.page.goto(
             INBOX_URL,
             wait_until="domcontentloaded",
             timeout=60000
         )
 
-        time.sleep(5)
+        await asyncio.sleep(5)
 
         if "login" in self.page.url:
+
             raise RuntimeError(
-                "Instagram login failed or additional verification is required"
+                "Instagram login failed or requires verification"
             )
 
-        print("[+] Login successful")
+        print(
+            "[+] Instagram login successful"
+        )
 
-    def threads(self):
-        with self.lock:
-            self.page.goto(
+    async def get_threads(self):
+
+        async with self.lock:
+
+            if not self.started:
+                raise RuntimeError(
+                    "Instagram controller is not ready"
+                )
+
+            await self.page.goto(
                 INBOX_URL,
                 wait_until="domcontentloaded",
                 timeout=60000
             )
 
-            time.sleep(3)
+            await asyncio.sleep(3)
 
-            return self.page.evaluate(
+            threads = await self.page.evaluate(
                 JS_EXTRACT_THREADS
             )
 
-    def open_thread(self, thread):
-        with self.lock:
-            threads = self.page.evaluate(
-                JS_EXTRACT_THREADS
+            return threads
+
+    async def open_thread(self, thread):
+
+        if not self.started:
+            raise RuntimeError(
+                "Instagram controller is not ready"
             )
 
-            target = None
+        threads = await self.page.evaluate(
+            JS_EXTRACT_THREADS
+        )
 
-            for item in threads:
-                if (
-                    item["name"].lower() == thread.lower()
-                    or item["href"] == thread
-                ):
-                    target = item
-                    break
+        target = None
 
-            if not target:
-                raise ValueError(
-                    f"Thread not found: {thread}"
-                )
+        for item in threads:
 
-            href = target["href"]
+            if (
+                item["name"].lower() == thread.lower()
+                or item["href"] == thread
+            ):
+                target = item
+                break
 
-            if not href:
-                raise ValueError(
-                    "Thread does not have a usable URL"
-                )
+        if not target:
 
-            if href.startswith("/"):
-                url = (
-                    "https://www.instagram.com"
-                    + href
-                )
-            else:
-                url = href
-
-            self.page.goto(
-                url,
-                wait_until="domcontentloaded",
-                timeout=60000
+            raise ValueError(
+                f"Thread not found: {thread}"
             )
 
-            time.sleep(3)
+        href = target["href"]
 
-            return target
+        if not href:
 
-    def messages(self, thread, limit=10):
-        with self.lock:
-            self.open_thread(thread)
+            raise ValueError(
+                "Thread does not have a usable URL"
+            )
 
-            messages = self.page.evaluate(
+        if href.startswith("/"):
+
+            target_url = (
+                "https://www.instagram.com"
+                + href
+            )
+
+        else:
+
+            target_url = href
+
+        await self.page.goto(
+            target_url,
+            wait_until="domcontentloaded",
+            timeout=60000
+        )
+
+        await asyncio.sleep(3)
+
+        return target
+
+    async def get_messages(
+        self,
+        thread,
+        limit
+    ):
+
+        async with self.lock:
+
+            await self.open_thread(
+                thread
+            )
+
+            messages = await self.page.evaluate(
                 JS_READ_MSGS,
                 limit
             )
 
             return messages
 
-    def send(self, thread, message):
-        with self.lock:
-            target = self.open_thread(thread)
+    async def send_message(
+        self,
+        thread,
+        message
+    ):
 
-            result = self.page.evaluate(
+        async with self.lock:
+
+            target = await self.open_thread(
+                thread
+            )
+
+            result = await self.page.evaluate(
                 JS_SEND_MSG,
                 message
             )
 
             if not result:
+
                 raise RuntimeError(
                     "Instagram message editor was not found"
                 )
 
-            time.sleep(1)
+            await asyncio.sleep(1)
 
             return {
                 "thread": target["name"],
@@ -472,8 +540,10 @@ class InstagramController:
             }
 
     def health(self):
+
         return {
             "started": self.started,
+            "error": self.start_error,
             "page_url": (
                 self.page.url
                 if self.page
@@ -481,86 +551,101 @@ class InstagramController:
             )
         }
 
-    def close(self):
-        with self.lock:
-            try:
-                if self.context:
-                    self.context.close()
-            except Exception:
-                pass
+    async def close(self):
 
-            try:
-                if self.browser:
-                    self.browser.close()
-            except Exception:
-                pass
+        try:
+            if self.context:
+                await self.context.close()
+        except:
+            pass
 
-            try:
-                if self.playwright:
-                    self.playwright.stop()
-            except Exception:
-                pass
+        try:
+            if self.browser:
+                await self.browser.close()
+        except:
+            pass
+
+        try:
+            if self.playwright:
+                await self.playwright.stop()
+        except:
+            pass
 
 
 controller = InstagramController()
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("[*] Starting Instagram API")
+async def lifespan(app):
 
-    try:
-        controller.start()
-    except Exception as e:
-        print(
-            f"[!] Instagram startup failed: {e}"
-        )
+    print(
+        "[*] Starting Instagram API"
+    )
+
+    await controller.start()
 
     yield
 
-    print("[*] Shutting down")
+    print(
+        "[*] Shutting down Instagram API"
+    )
 
-    controller.close()
+    await controller.close()
 
 
 app = FastAPI(
-    title="Instagram DM Playwright API",
+    title="Instagram DM API",
     version="1.0.0",
     lifespan=lifespan
 )
 
 
 @app.get("/")
-def root():
+async def root():
+
     return {
         "service": "Instagram DM API",
         "status": "online",
-        "endpoints": [
-            "/health",
-            "/threads",
-            "/messages/{thread}",
-            "/send"
-        ]
+        "instagram": controller.health(),
+        "endpoints": {
+            "health": "GET /health",
+            "threads": "GET /threads",
+            "messages": "GET /messages/{thread}?limit=20",
+            "send": "POST /send"
+        }
     }
 
 
+@app.head("/")
+async def head_root():
+
+    return
+
+
 @app.get("/health")
-def health():
-    return controller.health()
+async def health():
+
+    return {
+        "api": "online",
+        "instagram": controller.health()
+    }
 
 
 @app.get("/threads")
-def get_threads():
+async def threads():
+
     try:
-        threads = controller.threads()
+
+        result = await controller.get_threads()
 
         return {
             "success": True,
-            "count": len(threads),
-            "threads": threads
+            "count": len(result),
+            "threads": result
         }
 
     except Exception as e:
+
         raise HTTPException(
             status_code=500,
             detail=str(e)
@@ -568,10 +653,11 @@ def get_threads():
 
 
 @app.get("/messages/{thread}")
-def get_messages(
+async def messages(
     thread: str,
     limit: int = 10
 ):
+
     if limit < 1:
         limit = 1
 
@@ -579,7 +665,8 @@ def get_messages(
         limit = 100
 
     try:
-        messages = controller.messages(
+
+        result = await controller.get_messages(
             thread,
             limit
         )
@@ -587,17 +674,19 @@ def get_messages(
         return {
             "success": True,
             "thread": thread,
-            "count": len(messages),
-            "messages": messages
+            "count": len(result),
+            "messages": result
         }
 
     except ValueError as e:
+
         raise HTTPException(
             status_code=404,
             detail=str(e)
         )
 
     except Exception as e:
+
         raise HTTPException(
             status_code=500,
             detail=str(e)
@@ -605,15 +694,20 @@ def get_messages(
 
 
 @app.post("/send")
-def send_message(data: SendRequest):
+async def send(
+    data: SendRequest
+):
+
     if not data.message.strip():
+
         raise HTTPException(
             status_code=400,
             detail="Message cannot be empty"
         )
 
     try:
-        result = controller.send(
+
+        result = await controller.send_message(
             data.thread,
             data.message
         )
@@ -624,12 +718,14 @@ def send_message(data: SendRequest):
         }
 
     except ValueError as e:
+
         raise HTTPException(
             status_code=404,
             detail=str(e)
         )
 
     except Exception as e:
+
         raise HTTPException(
             status_code=500,
             detail=str(e)
@@ -637,10 +733,12 @@ def send_message(data: SendRequest):
 
 
 if __name__ == "__main__":
+
     import uvicorn
 
     uvicorn.run(
-        app,
+        "main:app",
         host="0.0.0.0",
-        port=PORT
+        port=PORT,
+        reload=False
     )
