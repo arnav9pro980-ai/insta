@@ -20,58 +20,90 @@ IG_SESSION_BASE64 = os.getenv("IG_SESSION_BASE64", "")
 PORT = int(os.getenv("PORT", "10000"))
 
 
+
+
 JS_EXTRACT_THREADS = """
 () => {
     const threads = [];
     const seen = new Set();
 
     function addThread(name, href) {
-        if (!name) return;
+        if (!name || !href) return;
 
         name = name.trim();
 
         if (!name) return;
 
-        if (
-            name.length > 100 ||
-            name === "Instagram" ||
-            name === "Messages" ||
-            name === "Requests"
-        ) {
+        if (!href.includes("/direct/t/")) {
             return;
         }
 
-        const key = href || name;
-
-        if (seen.has(key)) {
+        if (seen.has(href)) {
             return;
         }
 
-        seen.add(key);
+        seen.add(href);
 
         threads.push({
             name: name,
-            href: href || ""
+            href: href
         });
     }
 
-    const threadLinks = Array.from(
+    const links = Array.from(
         document.querySelectorAll('a[href*="/direct/t/"]')
     );
 
-    threadLinks.forEach(link => {
-        const titleSpan =
-            link.querySelector('span[title]') ||
-            link.querySelector('span[dir="auto"]');
+    for (const link of links) {
+        const href = link.getAttribute("href");
+
+        if (!href || !href.includes("/direct/t/")) {
+            continue;
+        }
 
         let name = "";
 
-        if (titleSpan) {
-            name = (
-                titleSpan.getAttribute("title") ||
-                titleSpan.innerText ||
-                ""
+        const titleElements = Array.from(
+            link.querySelectorAll("[title]")
+        );
+
+        for (const el of titleElements) {
+            const title = (
+                el.getAttribute("title") || ""
             ).trim();
+
+            if (
+                title &&
+                title !== "Messages" &&
+                title !== "Instagram"
+            ) {
+                name = title;
+                break;
+            }
+        }
+
+        if (!name) {
+            const spans = Array.from(
+                link.querySelectorAll("span")
+            );
+
+            for (const span of spans) {
+                const text = (
+                    span.innerText ||
+                    span.textContent ||
+                    ""
+                ).trim();
+
+                if (
+                    text &&
+                    text.length <= 100 &&
+                    text !== "Messages" &&
+                    text !== "Instagram"
+                ) {
+                    name = text;
+                    break;
+                }
+            }
         }
 
         if (!name) {
@@ -82,87 +114,32 @@ JS_EXTRACT_THREADS = """
             ).trim();
 
             if (text) {
-                name = text.split("\\n")[0].trim();
+                const lines = text
+                    .split("\\n")
+                    .map(x => x.trim())
+                    .filter(Boolean);
+
+                for (const line of lines) {
+                    if (
+                        line !== "Messages" &&
+                        line !== "Instagram"
+                    ) {
+                        name = line;
+                        break;
+                    }
+                }
             }
         }
 
-        const href = link.getAttribute("href") || "";
-
-        if (name && href) {
+        if (name) {
             addThread(name, href);
         }
-    });
-
-    if (threads.length === 0) {
-        const titleSpans = document.querySelectorAll(
-            "span[title]"
-        );
-
-        titleSpans.forEach(span => {
-            const val = (
-                span.getAttribute("title") ||
-                ""
-            ).trim();
-
-            if (!val) {
-                return;
-            }
-
-            const anchor = span.closest("a");
-
-            const href = anchor
-                ? anchor.getAttribute("href") || ""
-                : "";
-
-            if (
-                href.includes("/direct/") ||
-                !href
-            ) {
-                addThread(val, href);
-            }
-        });
-    }
-
-    if (threads.length === 0) {
-        const directElements = document.querySelectorAll(
-            '[href*="/direct/"]'
-        );
-
-        directElements.forEach(element => {
-            const href =
-                element.getAttribute("href") || "";
-
-            if (!href) {
-                return;
-            }
-
-            const text = (
-                element.innerText ||
-                element.textContent ||
-                ""
-            ).trim();
-
-            if (!text) {
-                return;
-            }
-
-            const lines = text
-                .split("\\n")
-                .map(x => x.trim())
-                .filter(Boolean);
-
-            if (lines.length > 0) {
-                addThread(
-                    lines[0],
-                    href
-                );
-            }
-        });
     }
 
     return threads;
 }
 """
+
 
 
 JS_READ_MSGS = """
