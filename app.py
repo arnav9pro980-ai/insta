@@ -1,317 +1,267 @@
-"""
-Chat Browser API - FastAPI + Playwright with a persistent Chrome profile.
-Logs in only when the saved session has expired.
-"""
-import asyncio
+import base64
 import json
 import os
-from contextlib import asynccontextmanager
-from typing import Optional
+import threading
+import time
+from fastapi import FastAPI
+import requests
+import uvicorn
+from playwright.sync_api import sync_playwright
 
-from fastapi import Depends, FastAPI, Header, HTTPException
-from playwright.async_api import async_playwright, BrowserContext, Page
-from pydantic import BaseModel, Field
+# ---------------------------------------------------------
+# CONFIGURATION & FIREBASE
+# ---------------------------------------------------------
+FIREBASE_DB_URL = "https://launcher-c813d-default-rtdb.europe-west1.firebasedatabase.app"
+INBOX_URL = "https://www.instagram.com/direct/inbox/"
+LOGIN_URL = "https://www.instagram.com/accounts/login/"
 
-# ---------------- Config (set these in Render env vars) ----------------
-USER_EMAIL = os.getenv("USER_EMAIL", "hiiamdudetntt")
-USER_PASSWORD = os.getenv("USER_PASSWORD", "ritika123")
-LOGIN_URL = os.getenv("LOGIN_URL", "https://www.instagram.com/")
-REDIRECT_URL = os.getenv("REDIRECT_URL", "https://www.instagram.com/direct/inbox/")
-BASE_URL = os.getenv("BASE_URL", "https://www.instagram.com")
-INBOX_MARKER = os.getenv("INBOX_MARKER", "/direct/")
-PROFILE_DIR = os.getenv("PROFILE_DIR", "/data/chrome_profile")  # Render disk
-API_KEY = os.getenv("API_KEY", "")
-HEADLESS = os.getenv("HEADLESS", "true").lower() != "false"
+# Read credentials and session base64 from environment variables for safety
+USERNAME = os.environ.get("IG_USERNAME", "hiiamdudetntt")
+PASSWORD = os.environ.get("IG_PASSWORD", "ritika123")
+SESSION_BASE64 = os.environ.get("IG_SESSION_BASE64", "")
 
-state: dict = {"context": None, "page": None, "last_error": None, "current_thread": None}
-lock = asyncio.Lock()
+# App State Tracker for /status endpoint
+bot_status = {
+    "authenticated": False,
+    "last_sync": None,
+    "active_thread": None,
+    "error": None
+}
 
-# ---------------- JS snippets (ported from your script) ----------------
-JS_HAS_LOGIN = """() => !!(document.querySelector('input[type="password"], input[name="password"]'))"""
+# ---------------------------------------------------------
+# JAVASCRIPT INJECTION SCRIPTS
+# ---------------------------------------------------------
+JS_AUTO_LOGIN = """
+(args) => {
+    const { userEmail, userPassword } = args;
+    const emailInput = document.querySelector('input[type="email"], input[name="email"], input[name="username"]');
+    const passInput = document.querySelector('input[type="password"], input[name="password"]');
 
-JS_FILL_LOGIN = """([email, pass]) => {
-  const e = document.querySelector('input[type="email"], input[name="email"], input[id="email"], input[name="username"]');
-  const p = document.querySelector('input[type="password"], input[name="password"], input[id="password"]');
-  if (!e || !p) return false;
-  const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
-  for (const [el, v] of [[e, email], [p, pass]]) {
-    set.call(el, v);
-    ['input','change','blur'].forEach(t => el.dispatchEvent(new Event(t, {bubbles: true})));
-  }
-  setTimeout(() => {
-    const b = document.querySelector('button[type="submit"], input[type="submit"], button[id*="login"], button[class*="login"]');
-    if (b) b.click(); else { const f = e.closest('form'); if (f) f.submit(); }
-  }, 400);
-  return true;
-}"""
+    if (emailInput && passInput) {
+        function setNativeInputValue(input, value) {
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+            setter.call(input, value);
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new Event('blur', { bubbles: true }));
+        }
 
-JS_THREADS = """() => {
-  const threads = [];
-  document.querySelectorAll('span[title]').forEach(span => {
-    const name = span.getAttribute('title').trim();
-    if (name && !threads.some(t => t.name === name)) {
-      const a = span.closest('a') || span.closest('div[role="button"]');
-      threads.push({ name, href: a && a.getAttribute('href') ? a.getAttribute('href') : '' });
+        setNativeInputValue(emailInput, userEmail);
+        setNativeInputValue(passInput, userPassword);
+
+        setTimeout(() => {
+            const submitBtn = document.querySelector('button[type="submit"], input[type="submit"]');
+            if (submitBtn) submitBtn.click();
+            else {
+                const form = emailInput.closest('form');
+                if (form) form.submit();
+            }
+        }, 400);
+        return "SUBMITTED";
     }
-  });
-  return threads;
-}"""
+    return "NO_FIELDS";
+}
+"""
 
-JS_CLICK_THREAD = """(name) => {
-  for (const span of document.querySelectorAll('span[title]')) {
-    if (span.getAttribute('title').trim() !== name) continue;
-    const t = span.closest('a') || span.closest('div[role="button"]') || span.closest('div[tabindex="0"]') || span;
-    ['mousedown','mouseup','click'].forEach(ev => t.dispatchEvent(new MouseEvent(ev, {view: window, bubbles: true, cancelable: true})));
-    return true;
-  }
-  return false;
-}"""
-
-JS_READ = """(limit) => {
-  const out = [];
-  document.querySelectorAll('div[role="article"][aria-roledescription="message"]').forEach(article => {
-    const te = article.querySelector('span[dir="auto"] div[dir="auto"]') ||
-               article.querySelector('div[dir="auto"] span[dir="auto"]') ||
-               article.querySelector('span[dir="auto"]');
-    if (!te) return;
-    const text = te.innerText.trim();
-    if (!text) return;
-    let row = article;
-    for (let i = 0; i < 6; i++) {
-      const p = row.parentElement; if (!p) break;
-      const s = getComputedStyle(p);
-      if (s.display === 'flex' || p.getAttribute('role') === 'row' || p.className.includes('html-div')) row = p;
-    }
-    let isSender = false;
-    const as = getComputedStyle(article), ps = getComputedStyle(article.parentElement || article);
-    if (as.alignSelf === 'flex-end' || ps.alignItems === 'flex-end' || ps.justifyContent === 'flex-end') isSender = true;
-    if (!isSender && article.getBoundingClientRect().left > innerWidth * 0.45) isSender = true;
-    let isReply = false, replyHeader = null, quoted = null;
-    row.querySelectorAll('div[role="button"]').forEach(b => {
-      if (b.contains(te)) return;
-      const bt = b.innerText.trim();
-      if (bt && bt !== text && !bt.includes('Reply') && !bt.includes('React')) { isReply = true; quoted = bt.replace(/\\n/g, ' '); }
+JS_EXTRACT_THREADS = """
+() => {
+    const threads = [];
+    const threadLinks = Array.from(document.querySelectorAll('a[href*="/direct/t/"]'));
+    
+    threadLinks.forEach(link => {
+        const titleSpan = link.querySelector('span[title]') || link.querySelector('span[dir="auto"]');
+        const name = titleSpan ? (titleSpan.getAttribute('title') || titleSpan.innerText).trim() : '';
+        const href = link.getAttribute('href');
+        const threadId = href.split('/direct/t/')[1]?.replace('/', '') || '';
+        
+        if (name && href && !threads.some(t => t.id === threadId)) {
+            threads.push({ id: threadId, name: name, href: href });
+        }
     });
-    if (!isReply) {
-      const n = Array.from(row.querySelectorAll('span, div')).find(el => /replied to/i.test(el.textContent));
-      if (n) { isReply = true; replyHeader = n.textContent.trim(); }
-    }
-    out.push({ sender: isSender ? 'YOU' : 'THEM', text, is_reply: isReply, reply_header: replyHeader, quoted_text: quoted });
-  });
-  return out.slice(-limit);
-}"""
+    return threads;
+}
+"""
 
-JS_SEND = """async (msg) => {
-  const ed = document.querySelector('div[contenteditable="true"]');
-  if (!ed) return false;
-  ed.focus();
-  document.execCommand('insertText', false, msg);
-  ed.dispatchEvent(new Event('input', {bubbles: true}));
-  await new Promise(r => setTimeout(r, 300));
-  const btn = document.querySelector('div[aria-label="Send"][role="button"], div[role="button"]:has(svg[aria-label="Send"])');
-  if (btn) btn.click();
-  else ed.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true}));
-  return true;
-}"""
+JS_READ_MSGS = """
+(limit) => {
+    const messageArticles = document.querySelectorAll('div[role="article"][aria-roledescription="message"]');
+    const extractedMessages = [];
 
-JS_REPLY_TO = """async (index) => {
-  const arts = Array.from(document.querySelectorAll('div[role="article"][aria-roledescription="message"]'));
-  const a = arts[arts.length + index];
-  if (!a) return false;
-  a.scrollIntoView({block: 'center'});
-  a.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
-  a.dispatchEvent(new MouseEvent('mouseenter', {bubbles: true}));
-  await new Promise(r => setTimeout(r, 500));
-  let row = a; for (let i = 0; i < 6 && row.parentElement; i++) row = row.parentElement;
-  const btn = row.querySelector('[aria-label*="Reply" i]') ||
-              Array.from(row.querySelectorAll('svg[aria-label]')).find(s => /reply/i.test(s.getAttribute('aria-label')))?.closest('[role="button"]');
-  if (!btn) return false;
-  btn.click();
-  return true;
-}"""
+    messageArticles.forEach(article => {
+        const textElement = article.querySelector('span[dir="auto"] div[dir="auto"]') || 
+                            article.querySelector('div[dir="auto"] span[dir="auto"]') ||
+                            article.querySelector('span[dir="auto"]');
+                            
+        if (!textElement) return;
+        const text = textElement.innerText.trim();
+        if (!text) return;
 
+        let isSender = false;
+        const articleStyle = window.getComputedStyle(article);
+        const parentStyle = window.getComputedStyle(article.parentElement || article);
+        
+        if (articleStyle.alignSelf === 'flex-end' || parentStyle.alignItems === 'flex-end' || parentStyle.justifyContent === 'flex-end') {
+            isSender = true;
+        }
 
-# ---------------- Browser helpers ----------------
-async def get_page() -> Page:
-    page: Optional[Page] = state["page"]
-    if page is None or page.is_closed():
-        ctx: BrowserContext = state["context"]
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        state["page"] = page
-    return page
+        extractedMessages.push({
+            sender: isSender ? 'YOU' : 'THEM',
+            text: text,
+            timestamp: Date.now()
+        });
+    });
 
+    return extractedMessages.slice(-limit);
+}
+"""
 
-async def ensure_logged_in(page: Page) -> bool:
-    """Log in only if the saved profile has no valid session."""
-    if await page.evaluate(JS_HAS_LOGIN):
-        if not (USER_EMAIL and USER_PASSWORD):
-            raise HTTPException(500, "Login required but USER_EMAIL/USER_PASSWORD not set")
-        await page.evaluate(JS_FILL_LOGIN, [USER_EMAIL, USER_PASSWORD])
-        try:
-            await page.wait_for_load_state("networkidle", timeout=20000)
-        except Exception:
-            pass
-        await asyncio.sleep(4)
-        return True
-    return False
-
-
-async def go_inbox(page: Page):
-    if INBOX_MARKER not in page.url:
-        await page.goto(REDIRECT_URL, wait_until="domcontentloaded")
-        await asyncio.sleep(3)
-    if await ensure_logged_in(page):
-        await page.goto(REDIRECT_URL, wait_until="domcontentloaded")
-        await asyncio.sleep(3)
-
-
-async def open_thread(page: Page, name: str):
-    await go_inbox(page)
-    threads = await page.evaluate(JS_THREADS)
-    match = next((t for t in threads if t["name"].lower() == name.lower()), None)
-    if not match:
-        raise HTTPException(404, f"Thread '{name}' not found. Available: {[t['name'] for t in threads]}")
-    if match["href"] and "/direct/t/" in match["href"]:
-        await page.goto(BASE_URL + match["href"], wait_until="domcontentloaded")
-    else:
-        await page.evaluate(JS_CLICK_THREAD, match["name"])
-    await asyncio.sleep(2.5)
-    state["current_thread"] = match["name"]
-
-
-# ---------------- App lifecycle ----------------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    os.makedirs(PROFILE_DIR, exist_ok=True)
-    pw = await async_playwright().start()
-    ctx = await pw.chromium.launch_persistent_context(
-        PROFILE_DIR,
-        headless=HEADLESS,
-        viewport={"width": 1280, "height": 900},
-        user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
-        args=["--no-sandbox", "--disable-dev-shm-usage",
-              "--disable-blink-features=AutomationControlled"],
-    )
-    state["context"] = ctx
+# ---------------------------------------------------------
+# FIREBASE HELPERS
+# ---------------------------------------------------------
+def save_threads_to_firebase(threads):
+    """Syncs retrieved thread list and IDs to Firebase Realtime Database."""
     try:
-        page = await get_page()
-        await page.goto(LOGIN_URL, wait_until="domcontentloaded")
-        await asyncio.sleep(3)
-        await go_inbox(page)
+        url = f"{FIREBASE_DB_URL}/instagram/threads.json"
+        data = {t['id']: {"name": t['name'], "href": t['href'], "last_updated": time.time()} for t in threads if t['id']}
+        requests.patch(url, json=data, timeout=10)
     except Exception as e:
-        state["last_error"] = str(e)
-    yield
-    await ctx.close()  # flushes cookies to disk
-    await pw.stop()
+        print(f"[!] Firebase Thread Save Error: {e}")
 
-
-app = FastAPI(title="Chat Browser API", lifespan=lifespan)
-
-
-def auth(x_api_key: str = Header(default="")):
-    if API_KEY and x_api_key != API_KEY:
-        raise HTTPException(401, "Invalid API key")
-
-
-class SendBody(BaseModel):
-    user: str = Field(..., description="Thread name as shown in /users")
-    message: str
-
-
-class ReplyBody(BaseModel):
-    user: str
-    message: str
-    message_index: int = Field(-1, description="-1 = last message, -2 = second last ...")
-
-
-# ---------------- Endpoints ----------------
-@app.get("/health")
-async def health():
-    ctx = state["context"]
-    return {"ok": ctx is not None, "browser_running": ctx is not None}
-
-
-@app.get("/status", dependencies=[Depends(auth)])
-async def status():
-    page = await get_page()
+def save_messages_to_firebase(thread_id, messages):
+    """Saves extracted chat messages under the specific thread ID in Firebase."""
     try:
-        login_page = await page.evaluate(JS_HAS_LOGIN)
-        title = await page.title()
-    except Exception:
-        login_page, title = None, None
+        url = f"{FIREBASE_DB_URL}/instagram/messages/{thread_id}.json"
+        requests.put(url, json=messages, timeout=10)
+    except Exception as e:
+        print(f"[!] Firebase Message Save Error: {e}")
+
+def save_session_to_firebase(context):
+    """Backs up browser storage state to Firebase RTDB for persistent restarts."""
+    try:
+        state = context.storage_state()
+        encoded = base64.b64encode(json.dumps(state).encode("utf-8")).decode("utf-8")
+        url = f"{FIREBASE_DB_URL}/instagram/session.json"
+        requests.put(url, json={"base64_session": encoded, "updated_at": time.time()}, timeout=10)
+        print("[+] Session state saved to Firebase!")
+    except Exception as e:
+        print(f"[!] Failed to back up session to Firebase: {e}")
+
+# ---------------------------------------------------------
+# PLAYWRIGHT AUTOMATION ENGINE
+# ---------------------------------------------------------
+def run_playwright_bot():
+    global bot_status
+    print("[*] Starting Playwright Automation Core...")
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled"
+            ]
+        )
+
+        # Restore session state from environment variable or memory
+        context_options = {
+            "viewport": {"width": 1280, "height": 900},
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+
+        if SESSION_BASE64:
+            try:
+                decoded = json.loads(base64.b64decode(SESSION_BASE64).decode("utf-8"))
+                context = browser.new_context(storage_state=decoded, **context_options)
+                print("[+] Loaded session from IG_SESSION_BASE64 env var.")
+            except Exception as e:
+                print(f"[!] Invalid SESSION_BASE64, creating new context: {e}")
+                context = browser.new_context(**context_options)
+        else:
+            context = browser.new_context(**context_options)
+
+        page = context.new_page()
+
+        # Login flow
+        print("[*] Navigating to Instagram Inbox...")
+        page.goto(INBOX_URL, wait_until="networkidle")
+        time.sleep(3)
+
+        if "login" in page.url or page.query_selector('input[name="username"]'):
+            print("[!] Performing automated login...")
+            page.goto(LOGIN_URL, wait_until="networkidle")
+            for _ in range(15):
+                res = page.evaluate(JS_AUTO_LOGIN, {"userEmail": USERNAME, "userPassword": PASSWORD})
+                if res == "SUBMITTED":
+                    print("[*] Credentials submitted. Awaiting auth...")
+                    time.sleep(8)
+                    break
+                time.sleep(1)
+
+            page.goto(INBOX_URL, wait_until="networkidle")
+            time.sleep(3)
+
+        bot_status["authenticated"] = True
+        save_session_to_firebase(context)
+
+        # Continuous Sync Daemon Loop
+        while True:
+            try:
+                # 1. Fetch thread sidebar
+                threads = page.evaluate(JS_EXTRACT_THREADS)
+                if threads:
+                    save_threads_to_firebase(threads)
+                    bot_status["last_sync"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+                    # 2. Iterate threads to pull messages into Firebase
+                    for t in threads[:3]: # Poll top 3 active threads
+                        if t.get("href") and t.get("id"):
+                            target_url = f"https://www.instagram.com{t['href']}" if t['href'].startswith('/') else t['href']
+                            bot_status["active_thread"] = t["name"]
+                            
+                            page.goto(target_url, wait_until="domcontentloaded")
+                            time.sleep(3)
+                            
+                            msgs = page.evaluate(JS_READ_MSGS, 15)
+                            if msgs:
+                                save_messages_to_firebase(t["id"], msgs)
+
+                # Return to main inbox before sleep cycle
+                page.goto(INBOX_URL, wait_until="domcontentloaded")
+                time.sleep(20) # Poll interval
+            except Exception as loop_err:
+                print(f"[!] Engine loop error: {loop_err}")
+                bot_status["error"] = str(loop_err)
+                time.sleep(10)
+
+# ---------------------------------------------------------
+# FASTAPI SERVER & ENDPOINTS
+# ---------------------------------------------------------
+app = FastAPI(title="Instagram Service Controller")
+
+@app.get("/health")
+def health_check():
+    """Render health check endpoint."""
+    return {"status": "ok", "timestamp": time.time()}
+
+@app.get("/status")
+def get_status():
+    """Bot monitoring & authentication status endpoint."""
     return {
-        "url": page.url,
-        "title": title,
-        "on_login_page": login_page,
-        "logged_in": login_page is False,
-        "current_thread": state["current_thread"],
-        "last_error": state["last_error"],
-        "profile_dir": PROFILE_DIR,
+        "bot_engine": "running",
+        "authenticated": bot_status["authenticated"],
+        "last_sync": bot_status["last_sync"],
+        "active_thread": bot_status["active_thread"],
+        "last_error": bot_status["error"]
     }
 
-
-@app.get("/screenshot", dependencies=[Depends(auth)])
-async def screenshot():
-    from fastapi.responses import Response
-    page = await get_page()
-    return Response(await page.screenshot(), media_type="image/png")
-
-
-@app.post("/login", dependencies=[Depends(auth)])
-async def login():
-    async with lock:
-        page = await get_page()
-        await page.goto(LOGIN_URL, wait_until="domcontentloaded")
-        await asyncio.sleep(3)
-        did = await ensure_logged_in(page)
-        return {"performed_login": did, "url": page.url}
-
-
-@app.get("/users", dependencies=[Depends(auth)])
-async def users():
-    async with lock:
-        page = await get_page()
-        await go_inbox(page)
-        return {"users": await page.evaluate(JS_THREADS)}
-
-
-@app.get("/messages/{user}", dependencies=[Depends(auth)])
-async def messages(user: str, limit: int = 10):
-    async with lock:
-        page = await get_page()
-        await open_thread(page, user)
-        return {"user": state["current_thread"], "messages": await page.evaluate(JS_READ, limit)}
-
-
-@app.post("/send", dependencies=[Depends(auth)])
-async def send(body: SendBody):
-    async with lock:
-        page = await get_page()
-        await open_thread(page, body.user)
-        ok = await page.evaluate(JS_SEND, body.message)
-        if not ok:
-            raise HTTPException(500, "Message box not found")
-        await asyncio.sleep(1)
-        return {"sent": True, "user": state["current_thread"], "message": body.message}
-
-
-@app.post("/reply", dependencies=[Depends(auth)])
-async def reply(body: ReplyBody):
-    async with lock:
-        page = await get_page()
-        await open_thread(page, body.user)
-        msgs = await page.evaluate(JS_READ, 1000)
-        target = msgs[body.message_index] if msgs and -len(msgs) <= body.message_index < 0 else None
-        if not await page.evaluate(JS_REPLY_TO, body.message_index):
-            raise HTTPException(500, "Could not open reply for that message")
-        await asyncio.sleep(0.5)
-        if not await page.evaluate(JS_SEND, body.message):
-            raise HTTPException(500, "Message box not found")
-        await asyncio.sleep(1)
-        return {"sent": True, "replied_to": target, "message": body.message}
-
+# Start Playwright daemon thread upon FastAPI startup
+@app.on_event("startup")
+def start_background_bot():
+    bot_thread = threading.Thread(target=run_playwright_bot, daemon=True)
+    bot_thread.start()
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
