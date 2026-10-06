@@ -1,46 +1,50 @@
 import base64
 import json
 import os
-import threading
 import time
-from fastapi import FastAPI
 import requests
-import uvicorn
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, BackgroundTasks, HTTPException
 from playwright.sync_api import sync_playwright
 
-# ---------------------------------------------------------
-# CONFIGURATION & FIREBASE
-# ---------------------------------------------------------
-FIREBASE_DB_URL = "https://launcher-c813d-default-rtdb.europe-west1.firebasedatabase.app"
+# Configuration from Environment Variables (Fallback to provided defaults)
+FIREBASE_DB_URL = os.getenv(
+    "FIREBASE_DB_URL",
+    "https://launcher-c813d-default-rtdb.europe-west1.firebasedatabase.app"
+)
+IG_USERNAME = os.getenv("IG_USERNAME", "hiiamdudetntt")
+IG_PASSWORD = os.getenv("IG_PASSWORD", "ritika123")
+
 INBOX_URL = "https://www.instagram.com/direct/inbox/"
 LOGIN_URL = "https://www.instagram.com/accounts/login/"
+PROFILE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "playwright_profile")
 
-# Read credentials and session base64 from environment variables for safety
-USERNAME = os.environ.get("IG_USERNAME", "hiiamdudetntt")
-PASSWORD = os.environ.get("IG_PASSWORD", "ritika123")
-SESSION_BASE64 = os.environ.get("IG_SESSION_BASE64", "")
-
-# App State Tracker for /status endpoint
-bot_status = {
-    "authenticated": False,
-    "last_sync": None,
-    "active_thread": None,
+# Global Application State
+APP_STATE = {
+    "is_authenticated": False,
+    "last_check_time": None,
+    "active_url": None,
+    "session_saved_to_firebase": False,
     "error": None
 }
 
-# ---------------------------------------------------------
-# JAVASCRIPT INJECTION SCRIPTS
-# ---------------------------------------------------------
+# JavaScript Injections
 JS_AUTO_LOGIN = """
 (args) => {
     const { userEmail, userPassword } = args;
-    const emailInput = document.querySelector('input[type="email"], input[name="email"], input[name="username"]');
-    const passInput = document.querySelector('input[type="password"], input[name="password"]');
+    const emailSelector = 'input[type="email"], input[name="email"], input[id="email"], input[name="username"]';
+    const passSelector = 'input[type="password"], input[name="password"], input[id="password"]';
+
+    const emailInput = document.querySelector(emailSelector);
+    const passInput = document.querySelector(passSelector);
 
     if (emailInput && passInput) {
         function setNativeInputValue(input, value) {
-            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-            setter.call(input, value);
+            if (!input) return;
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype, "value"
+            ).set;
+            nativeInputValueSetter.call(input, value);
             input.dispatchEvent(new Event('input', { bubbles: true }));
             input.dispatchEvent(new Event('change', { bubbles: true }));
             input.dispatchEvent(new Event('blur', { bubbles: true }));
@@ -50,9 +54,12 @@ JS_AUTO_LOGIN = """
         setNativeInputValue(passInput, userPassword);
 
         setTimeout(() => {
-            const submitBtn = document.querySelector('button[type="submit"], input[type="submit"]');
-            if (submitBtn) submitBtn.click();
-            else {
+            const submitButton = document.querySelector(
+                'button[type="submit"], input[type="submit"], button[id*="login"], button[id*="submit"]'
+            );
+            if (submitButton) {
+                submitButton.click();
+            } else {
                 const form = emailInput.closest('form');
                 if (form) form.submit();
             }
@@ -63,138 +70,83 @@ JS_AUTO_LOGIN = """
 }
 """
 
-JS_EXTRACT_THREADS = """
-() => {
-    const threads = [];
-    const threadLinks = Array.from(document.querySelectorAll('a[href*="/direct/t/"]'));
-    
-    threadLinks.forEach(link => {
-        const titleSpan = link.querySelector('span[title]') || link.querySelector('span[dir="auto"]');
-        const name = titleSpan ? (titleSpan.getAttribute('title') || titleSpan.innerText).trim() : '';
-        const href = link.getAttribute('href');
-        const threadId = href.split('/direct/t/')[1]?.replace('/', '') || '';
-        
-        if (name && href && !threads.some(t => t.id === threadId)) {
-            threads.push({ id: threadId, name: name, href: href });
-        }
-    });
-    return threads;
-}
-"""
-
-JS_READ_MSGS = """
-(limit) => {
-    const messageArticles = document.querySelectorAll('div[role="article"][aria-roledescription="message"]');
-    const extractedMessages = [];
-
-    messageArticles.forEach(article => {
-        const textElement = article.querySelector('span[dir="auto"] div[dir="auto"]') || 
-                            article.querySelector('div[dir="auto"] span[dir="auto"]') ||
-                            article.querySelector('span[dir="auto"]');
-                            
-        if (!textElement) return;
-        const text = textElement.innerText.trim();
-        if (!text) return;
-
-        let isSender = false;
-        const articleStyle = window.getComputedStyle(article);
-        const parentStyle = window.getComputedStyle(article.parentElement || article);
-        
-        if (articleStyle.alignSelf === 'flex-end' || parentStyle.alignItems === 'flex-end' || parentStyle.justifyContent === 'flex-end') {
-            isSender = true;
-        }
-
-        extractedMessages.push({
-            sender: isSender ? 'YOU' : 'THEM',
-            text: text,
-            timestamp: Date.now()
-        });
-    });
-
-    return extractedMessages.slice(-limit);
-}
-"""
-
-# ---------------------------------------------------------
-# FIREBASE HELPERS
-# ---------------------------------------------------------
-def save_threads_to_firebase(threads):
-    """Syncs retrieved thread list and IDs to Firebase Realtime Database."""
+# Firebase Session Storage Helpers
+def save_session_to_firebase(session_data: dict):
+    """Saves storage_state JSON object to Firebase Realtime Database."""
     try:
-        url = f"{FIREBASE_DB_URL}/instagram/threads.json"
-        data = {t['id']: {"name": t['name'], "href": t['href'], "last_updated": time.time()} for t in threads if t['id']}
-        requests.patch(url, json=data, timeout=10)
+        url = f"{FIREBASE_DB_URL.rstrip('/')}/ig_session.json"
+        response = requests.put(url, json=session_data, timeout=10)
+        if response.status_code == 200:
+            APP_STATE["session_saved_to_firebase"] = True
+            print("[+] Session successfully saved to Firebase RTDB.")
+        else:
+            print(f"[!] Failed to save session to Firebase: {response.status_code} - {response.text}")
     except Exception as e:
-        print(f"[!] Firebase Thread Save Error: {e}")
+        print(f"[!] Exception saving session to Firebase: {e}")
 
-def save_messages_to_firebase(thread_id, messages):
-    """Saves extracted chat messages under the specific thread ID in Firebase."""
+def load_session_from_firebase() -> dict | None:
+    """Retrieves existing storage_state JSON from Firebase Realtime Database."""
     try:
-        url = f"{FIREBASE_DB_URL}/instagram/messages/{thread_id}.json"
-        requests.put(url, json=messages, timeout=10)
+        url = f"{FIREBASE_DB_URL.rstrip('/')}/ig_session.json"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200 and response.json():
+            print("[+] Loaded existing session state from Firebase.")
+            return response.json()
     except Exception as e:
-        print(f"[!] Firebase Message Save Error: {e}")
+        print(f"[!] Exception fetching session from Firebase: {e}")
+    return None
 
-def save_session_to_firebase(context):
-    """Backs up browser storage state to Firebase RTDB for persistent restarts."""
-    try:
-        state = context.storage_state()
-        encoded = base64.b64encode(json.dumps(state).encode("utf-8")).decode("utf-8")
-        url = f"{FIREBASE_DB_URL}/instagram/session.json"
-        requests.put(url, json={"base64_session": encoded, "updated_at": time.time()}, timeout=10)
-        print("[+] Session state saved to Firebase!")
-    except Exception as e:
-        print(f"[!] Failed to back up session to Firebase: {e}")
+def init_automation_session():
+    """Initializes Playwright, loads session from Firebase if available, and authenticates."""
+    if not os.path.exists(PROFILE_DIR):
+        os.makedirs(PROFILE_DIR)
 
-# ---------------------------------------------------------
-# PLAYWRIGHT AUTOMATION ENGINE
-# ---------------------------------------------------------
-def run_playwright_bot():
-    global bot_status
-    print("[*] Starting Playwright Automation Core...")
+    session_state = load_session_from_firebase()
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled"
-            ]
-        )
+        browser_args = [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-blink-features=AutomationControlled",
+        ]
 
-        # Restore session state from environment variable or memory
-        context_options = {
-            "viewport": {"width": 1280, "height": 900},
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-
-        if SESSION_BASE64:
+        if session_state:
+            # Launch context with restored state from Firebase
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=PROFILE_DIR,
+                headless=True,
+                viewport={"width": 1280, "height": 900},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                args=browser_args
+            )
+            # Restore state cookies / storage
             try:
-                decoded = json.loads(base64.b64decode(SESSION_BASE64).decode("utf-8"))
-                context = browser.new_context(storage_state=decoded, **context_options)
-                print("[+] Loaded session from IG_SESSION_BASE64 env var.")
+                context.add_cookies(session_state.get("cookies", []))
             except Exception as e:
-                print(f"[!] Invalid SESSION_BASE64, creating new context: {e}")
-                context = browser.new_context(**context_options)
+                print(f"[!] Cookie restoration warning: {e}")
         else:
-            context = browser.new_context(**context_options)
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=PROFILE_DIR,
+                headless=True,
+                viewport={"width": 1280, "height": 900},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                args=browser_args
+            )
 
-        page = context.new_page()
+        page = context.pages[0] if context.pages else context.new_page()
 
-        # Login flow
-        print("[*] Navigating to Instagram Inbox...")
+        print("[*] Accessing Instagram Inbox...")
         page.goto(INBOX_URL, wait_until="networkidle")
         time.sleep(3)
 
         if "login" in page.url or page.query_selector('input[name="username"]'):
-            print("[!] Performing automated login...")
+            print("[!] Performing auto-login...")
             page.goto(LOGIN_URL, wait_until="networkidle")
+
             for _ in range(15):
-                res = page.evaluate(JS_AUTO_LOGIN, {"userEmail": USERNAME, "userPassword": PASSWORD})
+                res = page.evaluate(JS_AUTO_LOGIN, {"userEmail": IG_USERNAME, "userPassword": IG_PASSWORD})
                 if res == "SUBMITTED":
-                    print("[*] Credentials submitted. Awaiting auth...")
+                    print("[*] Credentials submitted. Waiting for session initialization...")
                     time.sleep(8)
                     break
                 time.sleep(1)
@@ -202,66 +154,49 @@ def run_playwright_bot():
             page.goto(INBOX_URL, wait_until="networkidle")
             time.sleep(3)
 
-        bot_status["authenticated"] = True
-        save_session_to_firebase(context)
+        APP_STATE["is_authenticated"] = "login" not in page.url
+        APP_STATE["active_url"] = page.url
+        APP_STATE["last_check_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Continuous Sync Daemon Loop
-        while True:
-            try:
-                # 1. Fetch thread sidebar
-                threads = page.evaluate(JS_EXTRACT_THREADS)
-                if threads:
-                    save_threads_to_firebase(threads)
-                    bot_status["last_sync"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        if APP_STATE["is_authenticated"]:
+            # Export session state and upload to Firebase
+            state = context.storage_state()
+            save_session_to_firebase(state)
 
-                    # 2. Iterate threads to pull messages into Firebase
-                    for t in threads[:3]: # Poll top 3 active threads
-                        if t.get("href") and t.get("id"):
-                            target_url = f"https://www.instagram.com{t['href']}" if t['href'].startswith('/') else t['href']
-                            bot_status["active_thread"] = t["name"]
-                            
-                            page.goto(target_url, wait_until="domcontentloaded")
-                            time.sleep(3)
-                            
-                            msgs = page.evaluate(JS_READ_MSGS, 15)
-                            if msgs:
-                                save_messages_to_firebase(t["id"], msgs)
+        context.close()
 
-                # Return to main inbox before sleep cycle
-                page.goto(INBOX_URL, wait_until="domcontentloaded")
-                time.sleep(20) # Poll interval
-            except Exception as loop_err:
-                print(f"[!] Engine loop error: {loop_err}")
-                bot_status["error"] = str(loop_err)
-                time.sleep(10)
+# FastAPI Lifecycle Manager
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Run session setup on startup
+    try:
+        init_automation_session()
+    except Exception as e:
+        APP_STATE["error"] = str(e)
+        print(f"[!] Startup automation error: {e}")
+    yield
 
-# ---------------------------------------------------------
-# FASTAPI SERVER & ENDPOINTS
-# ---------------------------------------------------------
-app = FastAPI(title="Instagram Service Controller")
+app = FastAPI(title="Instagram Automation Controller", lifespan=lifespan)
 
+# API Endpoints
 @app.get("/health")
 def health_check():
-    """Render health check endpoint."""
-    return {"status": "ok", "timestamp": time.time()}
+    """Health check endpoint required for Render blue/green deployments."""
+    return {"status": "ok", "service": "ig-controller"}
 
 @app.get("/status")
-def get_status():
-    """Bot monitoring & authentication status endpoint."""
+def status_check():
+    """Returns the current state of authentication and Firebase session storage."""
     return {
-        "bot_engine": "running",
-        "authenticated": bot_status["authenticated"],
-        "last_sync": bot_status["last_sync"],
-        "active_thread": bot_status["active_thread"],
-        "last_error": bot_status["error"]
+        "authenticated": APP_STATE["is_authenticated"],
+        "active_url": APP_STATE["active_url"],
+        "last_check": APP_STATE["last_check_time"],
+        "session_in_firebase": APP_STATE["session_saved_to_firebase"],
+        "error": APP_STATE["error"]
     }
 
-# Start Playwright daemon thread upon FastAPI startup
-@app.on_event("startup")
-def start_background_bot():
-    bot_thread = threading.Thread(target=run_playwright_bot, daemon=True)
-    bot_thread.start()
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+@app.post("/trigger-login")
+def trigger_login(background_tasks: BackgroundTasks):
+    """Manually re-trigger login and session export in background."""
+    background_tasks.add_task(init_automation_session)
+    return {"message": "Authentication refresh initiated in background."}
