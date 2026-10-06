@@ -13,13 +13,89 @@ from playwright.async_api import async_playwright
 INBOX_URL = "https://www.instagram.com/direct/inbox/"
 LOGIN_URL = "https://www.instagram.com/accounts/login/"
 
-IG_USERNAME = "hiiamdudetntt"
+IG_USERNAME = "hiamdudetntt"
 IG_PASSWORD = "ritika123"
 IG_SESSION_BASE64 = os.getenv("IG_SESSION_BASE64", "")
 
 PORT = int(os.getenv("PORT", "10000"))
 
 
+JS_AUTO_LOGIN = """
+(args) => {
+    const { userEmail, userPassword } = args;
+
+    const emailSelector =
+        'input[type="email"], input[name="email"], input[id="email"], input[name="username"]';
+
+    const passSelector =
+        'input[type="password"], input[name="password"], input[id="password"]';
+
+    const emailInput = document.querySelector(emailSelector);
+    const passInput = document.querySelector(passSelector);
+
+    if (emailInput && passInput) {
+
+        function setNativeInputValue(input, value) {
+            if (!input) return;
+
+            const nativeInputValueSetter =
+                Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype,
+                    "value"
+                ).set;
+
+            nativeInputValueSetter.call(input, value);
+
+            input.dispatchEvent(
+                new Event("input", { bubbles: true })
+            );
+
+            input.dispatchEvent(
+                new Event("change", { bubbles: true })
+            );
+
+            input.dispatchEvent(
+                new Event("blur", { bubbles: true })
+            );
+        }
+
+        setNativeInputValue(
+            emailInput,
+            userEmail
+        );
+
+        setNativeInputValue(
+            passInput,
+            userPassword
+        );
+
+        setTimeout(() => {
+
+            const submitButton =
+                document.querySelector(
+                    'button[type="submit"], input[type="submit"], button[id*="login"], button[id*="submit"]'
+                );
+
+            if (submitButton) {
+                submitButton.click();
+            } else {
+
+                const form =
+                    emailInput.closest("form");
+
+                if (form) {
+                    form.submit();
+                }
+            }
+
+        }, 400);
+
+        return "SUBMITTED";
+    }
+
+    return "NO_FIELDS";
+}
+"""
 
 
 JS_EXTRACT_THREADS = """
@@ -31,20 +107,29 @@ JS_EXTRACT_THREADS = """
     );
 
     threadLinks.forEach(link => {
+
         const titleSpan =
             link.querySelector('span[title]') ||
             link.querySelector('span[dir="auto"]');
 
         const name = titleSpan
-            ? (titleSpan.getAttribute('title') || titleSpan.innerText).trim()
-            : '';
+            ? (
+                titleSpan.getAttribute("title") ||
+                titleSpan.innerText
+              ).trim()
+            : "";
 
-        const href = link.getAttribute('href');
+        const href =
+            link.getAttribute("href");
 
         if (
             name &&
             href &&
-            !threads.some(t => t.name === name || t.href === href)
+            !threads.some(
+                t =>
+                    t.name === name ||
+                    t.href === href
+            )
         ) {
             threads.push({
                 name: name,
@@ -54,22 +139,42 @@ JS_EXTRACT_THREADS = """
     });
 
     if (threads.length === 0) {
-        const titleSpans = document.querySelectorAll('span[title]');
+
+        const titleSpans =
+            document.querySelectorAll(
+                "span[title]"
+            );
 
         titleSpans.forEach(span => {
-            const val = (span.getAttribute('title') || '').trim();
+
+            const val =
+                (
+                    span.getAttribute("title") ||
+                    ""
+                ).trim();
 
             if (!val) return;
-            if (val === 'Messages') return;
-            if (val === 'Instagram') return;
+            if (val === "Messages") return;
+            if (val === "Instagram") return;
 
-            if (threads.some(t => t.name === val)) return;
+            if (
+                threads.some(
+                    t => t.name === val
+                )
+            ) {
+                return;
+            }
 
-            const anchor = span.closest('a');
+            const anchor =
+                span.closest("a");
 
-            let href = anchor
-                ? (anchor.getAttribute('href') || '')
-                : '';
+            const href =
+                anchor
+                    ? (
+                        anchor.getAttribute("href") ||
+                        ""
+                      )
+                    : "";
 
             threads.push({
                 name: val,
@@ -85,13 +190,16 @@ JS_EXTRACT_THREADS = """
 
 JS_READ_MSGS = """
 (limit) => {
-    const messageArticles = document.querySelectorAll(
-        'div[role="article"][aria-roledescription="message"]'
-    );
+
+    const messageArticles =
+        document.querySelectorAll(
+            'div[role="article"][aria-roledescription="message"]'
+        );
 
     const extractedMessages = [];
 
     messageArticles.forEach(article => {
+
         const textElement =
             article.querySelector(
                 'span[dir="auto"] div[dir="auto"]'
@@ -107,7 +215,8 @@ JS_READ_MSGS = """
             return;
         }
 
-        const text = textElement.innerText.trim();
+        const text =
+            textElement.innerText.trim();
 
         if (!text) {
             return;
@@ -116,7 +225,9 @@ JS_READ_MSGS = """
         let rowContainer = article;
 
         for (let i = 0; i < 6; i++) {
+
             if (rowContainer.parentElement) {
+
                 const parent =
                     rowContainer.parentElement;
 
@@ -152,6 +263,7 @@ JS_READ_MSGS = """
         }
 
         if (!isSender) {
+
             const rect =
                 article.getBoundingClientRect();
 
@@ -172,6 +284,7 @@ JS_READ_MSGS = """
             );
 
         replyBtns.forEach(btn => {
+
             if (btn.contains(textElement)) {
                 return;
             }
@@ -185,6 +298,7 @@ JS_READ_MSGS = """
                 !btnText.includes("Reply") &&
                 !btnText.includes("React")
             ) {
+
                 isReply = true;
 
                 quotedText =
@@ -196,15 +310,20 @@ JS_READ_MSGS = """
         });
 
         extractedMessages.push({
-            sender: isSender
-                ? "YOU"
-                : "THEM",
 
-            text: text,
+            sender:
+                isSender
+                    ? "YOU"
+                    : "THEM",
 
-            is_reply: isReply,
+            text:
+                text,
 
-            quoted_text: quotedText
+            is_reply:
+                isReply,
+
+            quoted_text:
+                quotedText
         });
     });
 
@@ -215,6 +334,7 @@ JS_READ_MSGS = """
 
 JS_SEND_MSG = """
 (textToInsert) => {
+
     const editor =
         document.querySelector(
             'div[contenteditable="true"]'
@@ -236,12 +356,16 @@ JS_SEND_MSG = """
     );
 
     editor.dispatchEvent(
-        new Event("input", {
-            bubbles: true
-        })
+        new Event(
+            "input",
+            {
+                bubbles: true
+            }
+        )
     );
 
     setTimeout(() => {
+
         const sendBtn =
             document.querySelector(
                 'div[aria-label="Send"][role="button"]'
@@ -251,8 +375,11 @@ JS_SEND_MSG = """
             );
 
         if (sendBtn) {
+
             sendBtn.click();
+
         } else {
+
             const enterEvent =
                 new KeyboardEvent(
                     "keydown",
@@ -269,6 +396,7 @@ JS_SEND_MSG = """
                 enterEvent
             );
         }
+
     }, 300);
 
     return true;
@@ -284,6 +412,7 @@ class SendRequest(BaseModel):
 class InstagramController:
 
     def __init__(self):
+
         self.playwright = None
         self.browser = None
         self.context = None
@@ -305,11 +434,10 @@ class InstagramController:
 
             try:
 
-                self.playwright = (
+                self.playwright =
                     await async_playwright().start()
-                )
 
-                self.browser = (
+                self.browser =
                     await self.playwright.chromium.launch(
                         headless=True,
                         args=[
@@ -319,7 +447,6 @@ class InstagramController:
                             "--disable-blink-features=AutomationControlled"
                         ]
                     )
-                )
 
                 storage_state = None
 
@@ -331,16 +458,13 @@ class InstagramController:
 
                     try:
 
-                        decoded = (
+                        decoded =
                             base64.b64decode(
                                 IG_SESSION_BASE64
-                            )
-                            .decode("utf-8")
-                        )
+                            ).decode("utf-8")
 
-                        storage_state = json.loads(
-                            decoded
-                        )
+                        storage_state =
+                            json.loads(decoded)
 
                         print(
                             "[+] Instagram session loaded"
@@ -354,19 +478,19 @@ class InstagramController:
                         )
 
                 context_args = {
+
                     "viewport": {
                         "width": 1280,
                         "height": 900
                     },
 
-                    "user_agent": (
+                    "user_agent":
                         "Mozilla/5.0 "
                         "(Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 "
                         "(KHTML, like Gecko) "
                         "Chrome/120.0.0.0 "
                         "Safari/537.36"
-                    )
                 }
 
                 if storage_state:
@@ -375,15 +499,13 @@ class InstagramController:
                         "storage_state"
                     ] = storage_state
 
-                self.context = (
+                self.context =
                     await self.browser.new_context(
                         **context_args
                     )
-                )
 
-                self.page = (
+                self.page =
                     await self.context.new_page()
-                )
 
                 print(
                     "[*] Opening Instagram inbox..."
@@ -409,8 +531,8 @@ class InstagramController:
                     )
 
                     if (
-                        IG_USERNAME
-                        and IG_PASSWORD
+                        IG_USERNAME and
+                        IG_PASSWORD
                     ):
 
                         await self.login()
@@ -453,15 +575,17 @@ class InstagramController:
 
         await asyncio.sleep(3)
 
-        username_input = self.page.locator(
-            'input[name="username"], '
-            'input[type="email"]'
-        ).first
+        username_input =
+            self.page.locator(
+                'input[name="username"], '
+                'input[type="email"]'
+            ).first
 
-        password_input = self.page.locator(
-            'input[name="password"], '
-            'input[type="password"]'
-        ).first
+        password_input =
+            self.page.locator(
+                'input[name="password"], '
+                'input[type="password"]'
+            ).first
 
         await username_input.fill(
             IG_USERNAME
@@ -500,6 +624,22 @@ class InstagramController:
             "[+] Instagram login successful"
         )
 
+    async def wait_for_threads(self):
+
+        for _ in range(10):
+
+            threads =
+                await self.page.evaluate(
+                    JS_EXTRACT_THREADS
+                )
+
+            if threads:
+                return threads
+
+            await asyncio.sleep(1)
+
+        return []
+
     async def extract_threads(self):
 
         if not self.started:
@@ -508,19 +648,20 @@ class InstagramController:
                 "Instagram controller is not ready"
             )
 
-        await self.page.goto(
-            INBOX_URL,
-            wait_until="domcontentloaded",
-            timeout=60000
-        )
+        async with self.lock:
 
-        await asyncio.sleep(3)
+            await self.page.goto(
+                INBOX_URL,
+                wait_until="domcontentloaded",
+                timeout=60000
+            )
 
-        threads = await self.page.evaluate(
-            JS_EXTRACT_THREADS
-        )
+            await asyncio.sleep(3)
 
-        return threads
+            threads =
+                await self.wait_for_threads()
+
+            return threads
 
     async def open_thread(self, thread):
 
@@ -530,9 +671,8 @@ class InstagramController:
                 "Instagram controller is not ready"
             )
 
-        threads = await self.page.evaluate(
-            JS_EXTRACT_THREADS
-        )
+        threads =
+            await self.wait_for_threads()
 
         target = None
 
@@ -540,13 +680,15 @@ class InstagramController:
 
             if (
                 item["name"].lower()
-                == thread.lower()
-                or item["href"]
-                == thread
+                ==
+                thread.lower()
+                or
+                item["href"]
+                ==
+                thread
             ):
 
                 target = item
-
                 break
 
         if not target:
@@ -555,30 +697,63 @@ class InstagramController:
                 f"Thread not found: {thread}"
             )
 
-        href = target["href"]
+        href =
+            target["href"]
 
-        if not href:
+        print(
+            f"[*] Opening thread: {target['name']}"
+        )
 
-            raise ValueError(
-                "Thread does not have a usable URL"
-            )
+        if href:
 
-        if href.startswith("/"):
+            if href.startswith("/"):
 
-            target_url = (
-                "https://www.instagram.com"
-                + href
+                target_url =
+                    "https://www.instagram.com" + href
+
+            else:
+
+                target_url = href
+
+            await self.page.goto(
+                target_url,
+                wait_until="domcontentloaded",
+                timeout=60000
             )
 
         else:
 
-            target_url = href
+            escaped_name =
+                target["name"].replace(
+                    "\\",
+                    "\\\\"
+                ).replace(
+                    '"',
+                    '\\"'
+                )
 
-        await self.page.goto(
-            target_url,
-            wait_until="domcontentloaded",
-            timeout=60000
-        )
+            locator =
+                self.page.locator(
+                    f'span[title="{escaped_name}"]'
+                ).first
+
+            if await locator.count() == 0:
+
+                locator =
+                    self.page.locator(
+                        "span[title]"
+                    ).filter(
+                        has_text=target["name"]
+                    ).first
+
+            if await locator.count() == 0:
+
+                raise ValueError(
+                    f"Thread '{thread}' was detected "
+                    f"but its clickable element was not found."
+                )
+
+            await locator.click()
 
         await asyncio.sleep(3)
 
@@ -592,14 +767,23 @@ class InstagramController:
 
         async with self.lock:
 
+            await self.page.goto(
+                INBOX_URL,
+                wait_until="domcontentloaded",
+                timeout=60000
+            )
+
+            await asyncio.sleep(3)
+
             await self.open_thread(
                 thread
             )
 
-            messages = await self.page.evaluate(
-                JS_READ_MSGS,
-                limit
-            )
+            messages =
+                await self.page.evaluate(
+                    JS_READ_MSGS,
+                    limit
+                )
 
             return messages
 
@@ -611,14 +795,24 @@ class InstagramController:
 
         async with self.lock:
 
-            target = await self.open_thread(
-                thread
+            await self.page.goto(
+                INBOX_URL,
+                wait_until="domcontentloaded",
+                timeout=60000
             )
 
-            result = await self.page.evaluate(
-                JS_SEND_MSG,
-                message
-            )
+            await asyncio.sleep(3)
+
+            target =
+                await self.open_thread(
+                    thread
+                )
+
+            result =
+                await self.page.evaluate(
+                    JS_SEND_MSG,
+                    message
+                )
 
             if not result:
 
@@ -630,9 +824,14 @@ class InstagramController:
             await asyncio.sleep(1)
 
             return {
-                "thread": target["name"],
-                "message": message,
-                "sent": True
+                "thread":
+                    target["name"],
+
+                "message":
+                    message,
+
+                "sent":
+                    True
             }
 
     async def debug_data(self):
@@ -644,15 +843,28 @@ class InstagramController:
                 "error": self.start_error
             }
 
-        html = await self.page.content()
+        html =
+            await self.page.content()
 
         return {
-            "started": self.started,
-            "error": self.start_error,
-            "url": self.page.url,
-            "title": await self.page.title(),
-            "html_length": len(html),
-            "html_start": html[:5000]
+
+            "started":
+                self.started,
+
+            "error":
+                self.start_error,
+
+            "url":
+                self.page.url,
+
+            "title":
+                await self.page.title(),
+
+            "html_length":
+                len(html),
+
+            "html_start":
+                html[:5000]
         }
 
     async def screenshot(self):
@@ -670,13 +882,17 @@ class InstagramController:
     def health(self):
 
         return {
-            "started": self.started,
-            "error": self.start_error,
-            "page_url": (
+
+            "started":
+                self.started,
+
+            "error":
+                self.start_error,
+
+            "page_url":
                 self.page.url
                 if self.page
                 else None
-            )
         }
 
     async def close(self):
@@ -706,7 +922,8 @@ class InstagramController:
             pass
 
 
-controller = InstagramController()
+controller =
+    InstagramController()
 
 
 @asynccontextmanager
@@ -727,28 +944,47 @@ async def lifespan(app):
     await controller.close()
 
 
-app = FastAPI(
-    title="Instagram DM API",
-    version="1.0.0",
-    lifespan=lifespan
-)
+app =
+    FastAPI(
+        title="Instagram DM API",
+        version="1.0.0",
+        lifespan=lifespan
+    )
 
 
 @app.get("/")
 async def root():
 
     return {
-        "service": "Instagram DM API",
-        "status": "online",
-        "instagram": controller.health(),
+
+        "service":
+            "Instagram DM API",
+
+        "status":
+            "online",
+
+        "instagram":
+            controller.health(),
 
         "endpoints": {
-            "health": "GET /health",
-            "threads": "GET /threads",
-            "messages": "GET /messages/{thread}?limit=20",
-            "send": "POST /send",
-            "debug": "GET /debug",
-            "screenshot": "GET /screenshot"
+
+            "health":
+                "GET /health",
+
+            "threads":
+                "GET /threads",
+
+            "messages":
+                "GET /messages/{thread}?limit=20",
+
+            "send":
+                "POST /send",
+
+            "debug":
+                "GET /debug",
+
+            "screenshot":
+                "GET /screenshot"
         }
     }
 
@@ -763,8 +999,12 @@ async def head_root():
 async def health():
 
     return {
-        "api": "online",
-        "instagram": controller.health()
+
+        "api":
+            "online",
+
+        "instagram":
+            controller.health()
     }
 
 
@@ -773,12 +1013,19 @@ async def threads():
 
     try:
 
-        result = await controller.extract_threads()
+        result =
+            await controller.extract_threads()
 
         return {
-            "success": True,
-            "count": len(result),
-            "threads": result
+
+            "success":
+                True,
+
+            "count":
+                len(result),
+
+            "threads":
+                result
         }
 
     except Exception as e:
@@ -803,16 +1050,25 @@ async def messages(
 
     try:
 
-        result = await controller.read_messages(
-            thread,
-            limit
-        )
+        result =
+            await controller.read_messages(
+                thread,
+                limit
+            )
 
         return {
-            "success": True,
-            "thread": thread,
-            "count": len(result),
-            "messages": result
+
+            "success":
+                True,
+
+            "thread":
+                thread,
+
+            "count":
+                len(result),
+
+            "messages":
+                result
         }
 
     except ValueError as e:
@@ -830,195 +1086,74 @@ async def messages(
         )
 
 
-
-
-
-
-
-
-
-
-
-
-
 @app.post("/send")
-async def send_message(data: dict):
+async def send_message(
+    data: SendRequest
+):
+
     if not controller.started:
-        raise HTTPException(status_code=503, detail="Instagram controller is not ready")
 
-    thread = str(data.get("thread", "")).strip()
-    message = str(data.get("message", "")).strip()
+        raise HTTPException(
+            status_code=503,
+            detail="Instagram controller is not ready"
+        )
 
-    if not thread or not message:
+    thread =
+        data.thread.strip()
+
+    message =
+        data.message.strip()
+
+    if not thread:
+
         raise HTTPException(
             status_code=400,
-            detail="thread and message are required"
+            detail="thread is required"
         )
 
-    async with controller.lock:
-        opened = await controller.page.evaluate(
-            """
-            (thread) => {
-                const spans = Array.from(
-                    document.querySelectorAll('span[title]')
-                );
+    if not message:
 
-                const span = spans.find(
-                    s => (s.getAttribute('title') || '').trim() === thread
-                );
-
-                if (!span) return {
-                    success: false,
-                    reason: "thread_not_found"
-                };
-
-                let el = span;
-
-                for (let i = 0; i < 10 && el; i++) {
-                    const rect = el.getBoundingClientRect();
-
-                    if (
-                        rect.width > 0 &&
-                        rect.height > 0 &&
-                        (
-                            el.tagName === 'A' ||
-                            el.getAttribute('role') === 'button' ||
-                            el.getAttribute('role') === 'link' ||
-                            typeof el.onclick === 'function'
-                        )
-                    ) {
-                        el.click();
-
-                        return {
-                            success: true,
-                            tag: el.tagName,
-                            role: el.getAttribute('role')
-                        };
-                    }
-
-                    el = el.parentElement;
-                }
-
-                span.click();
-
-                return {
-                    success: true,
-                    tag: "SPAN",
-                    role: span.getAttribute("role")
-                };
-            }
-            """,
-            thread
+        raise HTTPException(
+            status_code=400,
+            detail="message is required"
         )
 
-        if not opened.get("success"):
-            raise HTTPException(
-                status_code=404,
-                detail=f"Could not find Instagram thread: {thread}"
+    try:
+
+        result =
+            await controller.send_message(
+                thread,
+                message
             )
-
-        await controller.page.wait_for_timeout(1500)
-
-        box_found = await controller.page.evaluate(
-            """
-            () => {
-                const box =
-                    document.querySelector('div[contenteditable="true"]') ||
-                    document.querySelector('p.xat24cr');
-
-                if (!box) return false;
-
-                box.focus();
-
-                return true;
-            }
-            """
-        )
-
-        if not box_found:
-            raise HTTPException(
-                status_code=500,
-                detail="Message input box not found"
-            )
-
-        await controller.page.evaluate(
-            """
-            (message) => {
-                const box =
-                    document.querySelector('div[contenteditable="true"]') ||
-                    document.querySelector('p.xat24cr');
-
-                if (!box) return false;
-
-                box.focus();
-
-                document.execCommand(
-                    'insertText',
-                    false,
-                    message
-                );
-
-                box.dispatchEvent(
-                    new InputEvent('input', {
-                        bubbles: true,
-                        inputType: 'insertText',
-                        data: message
-                    })
-                );
-
-                return true;
-            }
-            """,
-            message
-        )
-
-        await controller.page.wait_for_timeout(500)
-
-        sent = await controller.page.evaluate(
-            """
-            () => {
-                const buttons = Array.from(
-                    document.querySelectorAll(
-                        'button, div[role="button"]'
-                    )
-                );
-
-                const sendButton = buttons.find(
-                    el =>
-                        (el.innerText || '')
-                            .trim()
-                            .toLowerCase() === 'send'
-                );
-
-                if (sendButton) {
-                    sendButton.click();
-                    return true;
-                }
-
-                return false;
-            }
-            """
-        )
-
-        if not sent:
-            await controller.page.keyboard.press("Enter")
-            sent = true
 
         return {
-            "success": true,
-            "thread": thread,
-            "message": message,
-            "opened": opened,
-            "sent": sent
+
+            "success":
+                True,
+
+            **result
         }
 
+    except ValueError as e:
 
+        raise HTTPException(
+            status_code=404,
+            detail=str(e)
+        )
 
+    except RuntimeError as e:
 
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
+    except Exception as e:
 
-
-
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 
 @app.get("/debug")
@@ -1032,7 +1167,8 @@ async def screenshot():
 
     try:
 
-        image = await controller.screenshot()
+        image =
+            await controller.screenshot()
 
         return Response(
             content=image,
