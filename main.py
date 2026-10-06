@@ -13,8 +13,8 @@ from playwright.async_api import async_playwright
 INBOX_URL = "https://www.instagram.com/direct/inbox/"
 LOGIN_URL = "https://www.instagram.com/accounts/login/"
 
-IG_USERNAME = os.getenv("INSTA_USER", "")
-IG_PASSWORD = os.getenv("INSTA_PASSWORD", "")
+IG_USERNAME = "hiiamdudetntt"
+IG_PASSWORD = "ritika123"
 IG_SESSION_BASE64 = os.getenv("IG_SESSION_BASE64", "")
 
 PORT = int(os.getenv("PORT", "10000"))
