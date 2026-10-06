@@ -25,121 +25,36 @@ PORT = int(os.getenv("PORT", "10000"))
 JS_EXTRACT_THREADS = """
 () => {
     const threads = [];
-    const seen = new Set();
-
-    function addThread(name, href) {
-        if (!name || !href) return;
-
-        name = name.trim();
-
-        if (!name) return;
-
-        if (!href.includes("/direct/t/")) {
-            return;
+    
+    // Look for links pointing to specific chat threads (/direct/t/...)
+    const threadLinks = Array.from(document.querySelectorAll('a[href*="/direct/t/"]'));
+    
+    threadLinks.forEach(link => {
+        const titleSpan = link.querySelector('span[title]') || link.querySelector('span[dir="auto"]');
+        const name = titleSpan ? (titleSpan.getAttribute('title') || titleSpan.innerText).trim() : '';
+        const href = link.getAttribute('href');
+        
+        if (name && href && !threads.some(t => t.name === name || t.href === href)) {
+            threads.push({ name: name, href: href });
         }
+    });
 
-        if (seen.has(href)) {
-            return;
-        }
-
-        seen.add(href);
-
-        threads.push({
-            name: name,
-            href: href
+    // Fallback: search for titles directly if links are nested in custom buttons
+    if (threads.length === 0) {
+        const titleSpans = document.querySelectorAll('span[title]');
+        titleSpans.forEach(span => {
+            const val = span.getAttribute('title').trim();
+            if (val && !threads.some(t => t.name === val)) {
+                const anchor = span.closest('a');
+                const href = anchor ? anchor.getAttribute('href') : '';
+                threads.push({ name: val, href: href });
+            }
         });
-    }
-
-    const links = Array.from(
-        document.querySelectorAll('a[href*="/direct/t/"]')
-    );
-
-    for (const link of links) {
-        const href = link.getAttribute("href");
-
-        if (!href || !href.includes("/direct/t/")) {
-            continue;
-        }
-
-        let name = "";
-
-        const titleElements = Array.from(
-            link.querySelectorAll("[title]")
-        );
-
-        for (const el of titleElements) {
-            const title = (
-                el.getAttribute("title") || ""
-            ).trim();
-
-            if (
-                title &&
-                title !== "Messages" &&
-                title !== "Instagram"
-            ) {
-                name = title;
-                break;
-            }
-        }
-
-        if (!name) {
-            const spans = Array.from(
-                link.querySelectorAll("span")
-            );
-
-            for (const span of spans) {
-                const text = (
-                    span.innerText ||
-                    span.textContent ||
-                    ""
-                ).trim();
-
-                if (
-                    text &&
-                    text.length <= 100 &&
-                    text !== "Messages" &&
-                    text !== "Instagram"
-                ) {
-                    name = text;
-                    break;
-                }
-            }
-        }
-
-        if (!name) {
-            const text = (
-                link.innerText ||
-                link.textContent ||
-                ""
-            ).trim();
-
-            if (text) {
-                const lines = text
-                    .split("\\n")
-                    .map(x => x.trim())
-                    .filter(Boolean);
-
-                for (const line of lines) {
-                    if (
-                        line !== "Messages" &&
-                        line !== "Instagram"
-                    ) {
-                        name = line;
-                        break;
-                    }
-                }
-            }
-        }
-
-        if (name) {
-            addThread(name, href);
-        }
     }
 
     return threads;
 }
 """
-
 
 
 JS_READ_MSGS = """
