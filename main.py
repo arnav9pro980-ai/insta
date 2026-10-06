@@ -1000,7 +1000,7 @@ async def send_message(data: dict):
             """
         )
 
-        if (!sent:
+        if not sent:
             await controller.page.keyboard.press("Enter")
             sent = true
 
