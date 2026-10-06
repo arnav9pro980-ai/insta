@@ -25,30 +25,56 @@ PORT = int(os.getenv("PORT", "10000"))
 JS_EXTRACT_THREADS = """
 () => {
     const threads = [];
-    
-    // Look for links pointing to specific chat threads (/direct/t/...)
-    const threadLinks = Array.from(document.querySelectorAll('a[href*="/direct/t/"]'));
-    
+
+    const threadLinks = Array.from(
+        document.querySelectorAll('a[href*="/direct/t/"]')
+    );
+
     threadLinks.forEach(link => {
-        const titleSpan = link.querySelector('span[title]') || link.querySelector('span[dir="auto"]');
-        const name = titleSpan ? (titleSpan.getAttribute('title') || titleSpan.innerText).trim() : '';
+        const titleSpan =
+            link.querySelector('span[title]') ||
+            link.querySelector('span[dir="auto"]');
+
+        const name = titleSpan
+            ? (titleSpan.getAttribute('title') || titleSpan.innerText).trim()
+            : '';
+
         const href = link.getAttribute('href');
-        
-        if (name && href && !threads.some(t => t.name === name || t.href === href)) {
-            threads.push({ name: name, href: href });
+
+        if (
+            name &&
+            href &&
+            !threads.some(t => t.name === name || t.href === href)
+        ) {
+            threads.push({
+                name: name,
+                href: href
+            });
         }
     });
 
-    // Fallback: search for titles directly if links are nested in custom buttons
     if (threads.length === 0) {
         const titleSpans = document.querySelectorAll('span[title]');
+
         titleSpans.forEach(span => {
-            const val = span.getAttribute('title').trim();
-            if (val && !threads.some(t => t.name === val)) {
-                const anchor = span.closest('a');
-                const href = anchor ? anchor.getAttribute('href') : '';
-                threads.push({ name: val, href: href });
-            }
+            const val = (span.getAttribute('title') || '').trim();
+
+            if (!val) return;
+            if (val === 'Messages') return;
+            if (val === 'Instagram') return;
+
+            if (threads.some(t => t.name === val)) return;
+
+            const anchor = span.closest('a');
+
+            let href = anchor
+                ? (anchor.getAttribute('href') || '')
+                : '';
+
+            threads.push({
+                name: val,
+                href: href
+            });
         });
     }
 
