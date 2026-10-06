@@ -13,8 +13,8 @@ from playwright.async_api import async_playwright, BrowserContext, Page
 from pydantic import BaseModel, Field
 
 # ---------------- Config (set these in Render env vars) ----------------
-USER_EMAIL = os.getenv("USER_EMAIL", "")
-USER_PASSWORD = os.getenv("USER_PASSWORD", "")
+USER_EMAIL = os.getenv("USER_EMAIL", "hiiamdudetntt")
+USER_PASSWORD = os.getenv("USER_PASSWORD", "ritika123")
 LOGIN_URL = os.getenv("LOGIN_URL", "https://www.instagram.com/")
 REDIRECT_URL = os.getenv("REDIRECT_URL", "https://www.instagram.com/direct/inbox/")
 BASE_URL = os.getenv("BASE_URL", "https://www.instagram.com")
