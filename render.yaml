@@ -1,27 +1,20 @@
 services:
   - type: web
-    name: chat-browser-api
-    runtime: docker
-    plan: starter            # persistent disks need a paid plan
+    name: instagram-playwright-bot
+    env: python
+    buildCommand: |
+      pip install -r requirements.txt
+      playwright install chromium
+      playwright install-deps
+    startCommand: python main.py
     healthCheckPath: /health
-    disk:
-      name: chrome-profile
-      mountPath: /data
-      sizeGB: 1
+    autoDeploy: false
     envVars:
-      - key: API_KEY
-        generateValue: true
-      - key: USER_EMAIL
+      - key: IG_USERNAME
         sync: false
-      - key: USER_PASSWORD
+      - key: IG_PASSWORD
         sync: false
-      - key: LOGIN_URL
+      - key: IG_SESSION_BASE64
         sync: false
-      - key: REDIRECT_URL
-        sync: false
-      - key: BASE_URL
-        sync: false
-      - key: PROFILE_DIR
-        value: /data/chrome_profile
-      - key: HEADLESS
-        value: "true"
+      - key: PORT
+        value: 10000
