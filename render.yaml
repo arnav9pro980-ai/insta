@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: chat-browser-api
+    runtime: docker
+    plan: starter            # persistent disks need a paid plan
+    healthCheckPath: /health
+    disk:
+      name: chrome-profile
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: API_KEY
+        generateValue: true
+      - key: USER_EMAIL
+        sync: false
+      - key: USER_PASSWORD
+        sync: false
+      - key: LOGIN_URL
+        sync: false
+      - key: REDIRECT_URL
+        sync: false
+      - key: BASE_URL
+        sync: false
+      - key: PROFILE_DIR
+        value: /data/chrome_profile
+      - key: HEADLESS
+        value: "true"
